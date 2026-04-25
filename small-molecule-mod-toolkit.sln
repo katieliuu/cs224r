@@ -1,0 +1,23 @@
+﻿
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.14.36109.1 d17.14
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{888888A0-9F3D-457C-B088-3A5042F75D52}") = "small-molecule-mod-toolkit", "small-molecule-mod-toolkit.pyproj", "{75953D54-69A0-480C-8129-0B615FF7AA97}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{75953D54-69A0-480C-8129-0B615FF7AA97}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{75953D54-69A0-480C-8129-0B615FF7AA97}.Release|Any CPU.ActiveCfg = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(ExtensibilityGlobals) = postSolution
+		SolutionGuid = {D956F633-E432-470B-AA16-3FBB2E00CCA3}
+	EndGlobalSection
+EndGlobal
