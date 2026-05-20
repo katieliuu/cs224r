@@ -6,5 +6,8 @@
   "python.terminal.executeInFileDir": false,
   "terminal.integrated.env.windows": {
     "PYTHONPATH": "${workspaceFolder};${env:PYTHONPATH}"
-  }
+  },
+  "python-envs.defaultEnvManager": "ms-python.python:conda",
+  "python-envs.defaultPackageManager": "ms-python.python:conda",
+  "python-envs.pythonProjects": []
 }
