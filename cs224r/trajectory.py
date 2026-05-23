@@ -19,6 +19,7 @@ approximation rather than the true final value.
 Usage
 -----
   python trajectory.py [--n_frags 50] [--max_steps 6] [--seeds 7 42 99]
+  python trajectory.py --checkpoint checkpoints/ckpt_ep6000.pt [--greedy]
 """
 import _path_bootstrap  # noqa: F401
 
@@ -34,17 +35,15 @@ import matplotlib.gridspec as gridspec
 import numpy as np
 from PIL import Image
 
+import torch
+
 from rdkit import Chem
-from rdkit.Chem import Descriptors, Draw
-from rdkit.Chem.QED import qed as _rdkit_qed
 from rdkit.Chem.Draw import rdMolDraw2D
 
-from data import (
-    load_fragment_library, load_target_distribution,
-    denormalize_props, PROP_NAMES,
-)
-from env import MolEnv, TERMINATE, _normalise_brics_smiles
-from features import compute_norm_properties, normalize_props
+from data import load_fragment_library, load_target_distribution, denormalize_props
+from env import MolEnv, TERMINATE
+from features import compute_norm_properties
+from model import Actor
 from chem.build.molgraph_to_mol import molgraph_to_mol
 from core.structs import MolGraph
 
@@ -116,28 +115,34 @@ def molgraph_to_pil(mg: MolGraph, size: Tuple[int, int] = (300, 240)) -> Image.I
 # Episode data collection
 # ---------------------------------------------------------------------------
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 @dataclass
 class StepSnapshot:
     step:        int
     action_desc: str
     mol_graph:   MolGraph
-    props_norm:  Optional[np.ndarray]   # normalised, None if not computable
+    props_norm:  Optional[np.ndarray]
     reward:      float
     done:        bool
     n_open_sites: int
 
 
-def run_episode(env: MolEnv, seed: int) -> Tuple[np.ndarray, List[StepSnapshot]]:
+def run_episode(
+    env: MolEnv,
+    seed: int,
+    actor: Optional[Actor] = None,
+    device: torch.device = torch.device("cpu"),
+    greedy: bool = True,
+) -> Tuple[np.ndarray, List[StepSnapshot]]:
     """
-    Roll out one episode using a random policy and record every step.
+    Roll out one episode and record every step.
+    Uses the trained actor if provided, otherwise a random policy.
     Returns (goal_norm, snapshots).
     """
     np.random.seed(seed)
     state, goal_norm, valid_actions = env.reset()
 
-    # Snapshot t=0: seed fragment
     snapshots: List[StepSnapshot] = [StepSnapshot(
         step=0,
         action_desc="seed",
@@ -151,7 +156,16 @@ def run_episode(env: MolEnv, seed: int) -> Tuple[np.ndarray, List[StepSnapshot]]
     done = False
     step = 0
     while not done:
-        idx    = np.random.randint(len(valid_actions))
+        if actor is not None:
+            af_np   = env.get_action_features(valid_actions)
+            state_t = torch.tensor(state, dtype=torch.float32, device=device)
+            af_t    = torch.tensor(af_np,  dtype=torch.float32, device=device)
+            with torch.no_grad():
+                dist_t = actor.action_dist(state_t, af_t)
+                idx = int(dist_t.probs.argmax().item()) if greedy else int(dist_t.sample().item())
+        else:
+            idx = np.random.randint(len(valid_actions))
+
         action = valid_actions[idx]
         result = env.step(action)
         step  += 1
@@ -164,10 +178,8 @@ def run_episode(env: MolEnv, seed: int) -> Tuple[np.ndarray, List[StepSnapshot]]
 
         props = partial_properties(env._mol)
         if result.done and result.info.get("achieved_goal") is not None:
-            props = result.info["achieved_goal"]   # exact terminal props
+            props = result.info["achieved_goal"]
 
-        # For the terminal frame: cap dummies so the displayed molecule matches
-        # what was actually scored (no dangling *:N attachment points).
         display_mg = deepcopy(env._mol)
         if result.done:
             raw_mol = molgraph_to_mol(display_mg, sanitize=False, remove_hs=False)
@@ -176,10 +188,9 @@ def run_episode(env: MolEnv, seed: int) -> Tuple[np.ndarray, List[StepSnapshot]]
                 from chem.build.create_molgraph import smiles_to_molgraph as _s2mg
                 from rdkit.Chem import MolToSmiles as _smi
                 try:
-                    capped_smi  = _smi(capped)
-                    display_mg  = _s2mg(capped_smi) or display_mg
+                    display_mg = _s2mg(_smi(capped)) or display_mg
                 except Exception:
-                    pass   # fall back to raw if conversion fails
+                    pass
 
         snapshots.append(StepSnapshot(
             step=step,
@@ -191,7 +202,8 @@ def run_episode(env: MolEnv, seed: int) -> Tuple[np.ndarray, List[StepSnapshot]]
             n_open_sites=len(env._open_labels()),
         ))
 
-        done = result.done
+        state = result.state
+        done  = result.done
         if not done:
             valid_actions = result.info.get("valid_actions", [TERMINATE])
 
@@ -252,10 +264,10 @@ def _prop_block(
     dist = float(np.linalg.norm(props_norm - goal_norm))
     lines.append(f"L2 dist: {dist:.3f}")
     lines.append("")
-    for nm, u, pn, pr, gn, gr in zip(
+    for nm, u, pn, pr, gn in zip(
         raw_names, raw_units,
         props_norm, raw_props,
-        goal_norm,  raw_goal,
+        goal_norm,
     ):
         delta = pn - gn
         sign  = "+" if delta >= 0 else ""
@@ -376,11 +388,20 @@ def render_trajectory(
 # Main
 # ---------------------------------------------------------------------------
 
-def main(n_frags: int = 50, max_steps: int = 6, seeds: List[int] = None):
+def main(
+    n_frags: int = 200,
+    max_steps: int = 6,
+    seeds: List[int] = None,
+    checkpoint: Optional[str] = None,
+    greedy: bool = True,
+    device_str: str = "cpu",
+):
     if seeds is None:
         seeds = [7, 42, 99]
 
-    print("Loading data …")
+    device = torch.device(device_str)
+
+    print("Loading data ...")
     frags   = load_fragment_library(
         "/mnt/data/m3_20m/outputs/fragments.parquet",
         n=n_frags, min_count=5_000,
@@ -389,37 +410,49 @@ def main(n_frags: int = 50, max_steps: int = 6, seeds: List[int] = None):
         "/mnt/data/m3_20m/outputs/parents.parquet",
         n=300,
     )
-
     env = MolEnv(frags, targets, max_steps=max_steps)
 
+    actor = None
+    if checkpoint is not None:
+        print(f"Loading actor from {checkpoint} ...")
+        ckpt  = torch.load(checkpoint, map_location=device)
+        actor = Actor(hidden_dim=ckpt["config"].get("hidden_dim", 256)).to(device)
+        actor.load_state_dict(ckpt["actor"])
+        actor.eval()
+        policy_label = "trained"
+    else:
+        policy_label = "random"
+
     for seed in seeds:
-        print(f"\n── Seed {seed} ──────────────────────────────")
-        goal_norm, snapshots = run_episode(env, seed)
+        print(f"\nSeed {seed}  [{policy_label} policy]")
+        goal_norm, snapshots = run_episode(env, seed, actor=actor, device=device, greedy=greedy)
 
         goal_raw = denormalize_props(goal_norm)
-        print(f"  Goal: LogP={goal_raw[0]:+.3f}  QED={goal_raw[1]:.3f}  "
-              f"TPSA={goal_raw[2]:.1f} Å²")
-        print(f"  Steps: {len(snapshots)-1}  "
-              f"(+1 seed state = {len(snapshots)} total snapshots)")
+        print(f"  Goal: LogP={goal_raw[0]:+.3f}  QED={goal_raw[1]:.3f}  TPSA={goal_raw[2]:.1f}")
 
         for snap in snapshots:
-            if snap.props_norm is not None:
-                dist = float(np.linalg.norm(snap.props_norm - goal_norm))
-                dist_s = f"L2={dist:.3f}"
-            else:
-                dist_s = "L2=N/A"
+            dist_s = f"L2={np.linalg.norm(snap.props_norm - goal_norm):.3f}" if snap.props_norm is not None else "L2=N/A"
             tag = "DONE" if snap.done else "    "
-            print(f"    t={snap.step} {tag}  {dist_s}  "
-                  f"open_sites={snap.n_open_sites}  r={snap.reward:.3f}")
+            print(f"    t={snap.step} {tag}  {dist_s}  open={snap.n_open_sites}  r={snap.reward:.3f}")
 
-        out = f"trajectory_seed{seed}.png"
+        out = f"trajectory_{policy_label}_seed{seed}.png"
         render_trajectory(goal_norm, snapshots, seed=seed, out_path=out)
 
 
 if __name__ == "__main__":
     p = argparse.ArgumentParser()
-    p.add_argument("--n_frags",  type=int,   default=50)
-    p.add_argument("--max_steps",type=int,   default=6)
-    p.add_argument("--seeds",    type=int,   nargs="+", default=[7, 42, 99])
+    p.add_argument("--n_frags",    type=int,   default=200)
+    p.add_argument("--max_steps",  type=int,   default=6)
+    p.add_argument("--seeds",      type=int,   nargs="+", default=[7, 42, 99])
+    p.add_argument("--checkpoint", type=str,   default=None)
+    p.add_argument("--greedy",     action="store_true", default=True)
+    p.add_argument("--device",     type=str,   default="cpu")
     args = p.parse_args()
-    main(n_frags=args.n_frags, max_steps=args.max_steps, seeds=args.seeds)
+    main(
+        n_frags=args.n_frags,
+        max_steps=args.max_steps,
+        seeds=args.seeds,
+        checkpoint=args.checkpoint,
+        greedy=args.greedy,
+        device_str=args.device,
+    )

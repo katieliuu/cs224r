@@ -1,24 +1,22 @@
 """
-train.py
-A2C-style (actor-critic with Monte-Carlo returns) training loop.
+train_gnn.py
+A2C + HER training with a GNN state encoder (replaces Morgan fingerprint).
 
-Algorithm per update step
---------------------------
-  Advantage  A = G - V(s)
-  Actor loss = -E[log π(a|s) · A] - α · H[π]
-  Critic loss= λ · E[(G - V(s))²]
-
-Hindsight Experience Replay is applied transparently inside ReplayBuffer.
+The MolGraph is stored in each transition's info dict so HER relabelling
+copies it for free.  During updates the GNN processes the raw graph while
+the goal comes from the last GOAL_DIM elements of the (possibly relabelled)
+state vector.
 
 Usage
 -----
-  python train.py                              # default config
-  python train.py --n_episodes 500            # quick smoke-test
+  python train_gnn.py
+  python train_gnn.py --n_episodes 10000
 """
 import _path_bootstrap  # noqa: F401
 
 import argparse
 import os
+from copy import deepcopy
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
@@ -26,29 +24,27 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 
-from data import load_fragment_library, load_target_distribution
+from data import load_fragment_library, load_target_distribution, GOAL_DIM
 from env import MolEnv, Action, TERMINATE, StepResult
-from model import Actor, Critic
+from model_gnn import GNNActor, GNNCritic
 from replay import ReplayBuffer, Episode, Transition
 
 
 # ---------------------------------------------------------------------------
-# Default configuration
+# Configuration
 # ---------------------------------------------------------------------------
 
 DEFAULT_CFG: Dict = dict(
     fragments_parquet="/mnt/data/m3_20m/outputs/fragments.parquet",
     parents_parquet="/mnt/data/m3_20m/outputs/parents.parquet",
-    # --- data subset (tiny for now) ---
     n_frags=200,
     min_frag_count=5_000,
     n_targets=300,
-    # --- environment ---
     max_steps=6,
-    # --- training ---
     n_episodes=10_000,
     batch_size=64,
     hidden_dim=256,
+    gnn_dim=128,
     lr_actor=3e-4,
     lr_critic=1e-3,
     gamma=0.99,
@@ -56,36 +52,34 @@ DEFAULT_CFG: Dict = dict(
     entropy_coef=0.005,
     critic_coef=0.5,
     grad_clip=1.0,
-    # --- logging ---
     log_every=50,
     checkpoint_every=500,
-    checkpoint_dir="checkpoints",
+    checkpoint_dir="checkpoints_gnn",
     device="cuda" if __import__("torch").cuda.is_available() else "cpu",
 )
 
 
 # ---------------------------------------------------------------------------
-# Rollout
+# Rollout (stores mol_graph in info)
 # ---------------------------------------------------------------------------
 
-def rollout(env: MolEnv, actor: Actor, device: torch.device) -> Episode:
-    """Execute one episode under the current policy; return the Episode."""
+def rollout_gnn(env: MolEnv, actor: GNNActor, device: torch.device) -> Episode:
     state, goal, valid_actions = env.reset()
     ep = Episode()
 
     for _ in range(env.max_steps):
-        af_np = env.get_action_features(valid_actions)
-        state_t = torch.tensor(state, dtype=torch.float32, device=device)
-        af_t    = torch.tensor(af_np, dtype=torch.float32, device=device)
+        mol_graph = deepcopy(env._mol)   # snapshot graph before step
+        af_np     = env.get_action_features(valid_actions)
+        goal_t    = torch.tensor(goal, dtype=torch.float32, device=device)
+        af_t      = torch.tensor(af_np, dtype=torch.float32, device=device)
 
         with torch.no_grad():
-            dist = actor.action_dist(state_t, af_t)
+            dist       = actor.action_dist(mol_graph, goal_t, af_t, device)
             action_idx = int(dist.sample().item())
 
         result: StepResult = env.step(valid_actions[action_idx])
-
-        next_valid = result.info.get("valid_actions", [TERMINATE])
-        next_af_np = env.get_action_features(next_valid)
+        next_valid  = result.info.get("valid_actions", [TERMINATE])
+        next_af_np  = env.get_action_features(next_valid)
 
         ep.add(Transition(
             state=state,
@@ -96,14 +90,13 @@ def rollout(env: MolEnv, actor: Actor, device: torch.device) -> Episode:
             next_action_feats=next_af_np,
             done=result.done,
             goal=goal,
-            info=result.info,
+            info={**result.info, "mol_graph": mol_graph},
         ))
 
         if result.done:
             ep.achieved_goal = result.info.get("achieved_goal")
             break
-
-        state = result.state
+        state         = result.state
         valid_actions = next_valid
 
     return ep
@@ -113,42 +106,43 @@ def rollout(env: MolEnv, actor: Actor, device: torch.device) -> Episode:
 # Parameter update
 # ---------------------------------------------------------------------------
 
-def update(
-    actor: Actor,
-    critic: Critic,
+def update_gnn(
+    actor:     GNNActor,
+    critic:    GNNCritic,
     opt_actor: optim.Optimizer,
     opt_critic: optim.Optimizer,
-    batch: list,
-    cfg: Dict,
-    device: torch.device,
+    batch:     list,
+    cfg:       Dict,
+    device:    torch.device,
 ) -> Dict[str, float]:
     if not batch:
         return {}
 
-    actor_losses: List[torch.Tensor] = []
-    critic_losses: List[torch.Tensor] = []
-    entropies: List[float] = []
-    advantages: List[torch.Tensor] = []
-
-    # First pass: collect raw advantages for normalisation
+    # First pass: collect values and returns for advantage normalisation
     Vs: List[torch.Tensor] = []
     Gs: List[torch.Tensor] = []
     for (t, G) in batch:
-        state_t = torch.tensor(t.state, dtype=torch.float32, device=device)
-        G_t     = torch.tensor(G,       dtype=torch.float32, device=device)
-        Vs.append(critic(state_t))
+        mg     = t.info.get("mol_graph")
+        goal_t = torch.tensor(t.state[-GOAL_DIM:], dtype=torch.float32, device=device)
+        G_t    = torch.tensor(G, dtype=torch.float32, device=device)
+        Vs.append(critic(mg, goal_t, device))
         Gs.append(G_t)
 
-    Vs_t    = torch.stack(Vs)
-    Gs_t    = torch.stack(Gs)
-    adv_raw = Gs_t - Vs_t.detach()
+    Vs_t     = torch.stack(Vs)
+    Gs_t     = torch.stack(Gs)
+    adv_raw  = Gs_t - Vs_t.detach()
     adv_norm = (adv_raw - adv_raw.mean()) / (adv_raw.std() + 1e-8)
 
-    for i, (t, G) in enumerate(batch):
-        state_t = torch.tensor(t.state,        dtype=torch.float32, device=device)
-        af_t    = torch.tensor(t.action_feats, dtype=torch.float32, device=device)
+    actor_losses: List[torch.Tensor] = []
+    critic_losses: List[torch.Tensor] = []
+    entropies:    List[float]         = []
 
-        dist     = actor.action_dist(state_t, af_t)
+    for i, (t, G) in enumerate(batch):
+        mg     = t.info.get("mol_graph")
+        goal_t = torch.tensor(t.state[-GOAL_DIM:], dtype=torch.float32, device=device)
+        af_t   = torch.tensor(t.action_feats, dtype=torch.float32, device=device)
+
+        dist     = actor.action_dist(mg, goal_t, af_t, device)
         log_prob = dist.log_prob(torch.tensor(t.action_idx, device=device))
         entropy  = dist.entropy()
 
@@ -177,38 +171,38 @@ def update(
 
 
 # ---------------------------------------------------------------------------
-# Main training loop
+# Training loop
 # ---------------------------------------------------------------------------
 
-def train(cfg: Optional[Dict] = None) -> Tuple[Actor, Critic]:
+def train(cfg: Optional[Dict] = None) -> Tuple[GNNActor, GNNCritic]:
     if cfg is None:
         cfg = DEFAULT_CFG
 
     device = torch.device(cfg["device"])
 
-    print("Loading fragment library …")
+    print("Loading fragment library ...")
     frags = load_fragment_library(
         cfg["fragments_parquet"], n=cfg["n_frags"], min_count=cfg["min_frag_count"]
     )
-    print(f"  {len(frags)} fragments loaded")
+    print(f"  {len(frags)} fragments")
 
-    print("Loading target distribution …")
+    print("Loading target distribution ...")
     targets = load_target_distribution(cfg["parents_parquet"], n=cfg["n_targets"])
-    print(f"  {len(targets)} target molecules "
-          f"| LogP∈[{targets[:,0].min():.2f},{targets[:,0].max():.2f}] "
-          f"| QED∈[{targets[:,1].min():.2f},{targets[:,1].max():.2f}] "
-          f"| TPSA∈[{targets[:,2].min():.2f},{targets[:,2].max():.2f}]")
+    print(f"  {len(targets)} targets")
 
     env    = MolEnv(frags, targets, max_steps=cfg["max_steps"])
-    actor  = Actor(hidden_dim=cfg["hidden_dim"]).to(device)
-    critic = Critic(hidden_dim=cfg["hidden_dim"]).to(device)
+    actor  = GNNActor(gnn_dim=cfg["gnn_dim"], hidden_dim=cfg["hidden_dim"]).to(device)
+    critic = GNNCritic(gnn_dim=cfg["gnn_dim"], hidden_dim=cfg["hidden_dim"]).to(device)
+
+    n_actor  = sum(p.numel() for p in actor.parameters())
+    n_critic = sum(p.numel() for p in critic.parameters())
+    print(f"  GNNActor params:  {n_actor:,}")
+    print(f"  GNNCritic params: {n_critic:,}")
 
     opt_actor  = optim.Adam(actor.parameters(),  lr=cfg["lr_actor"])
     opt_critic = optim.Adam(critic.parameters(), lr=cfg["lr_critic"])
 
-    buffer = ReplayBuffer(
-        max_episodes=2_000, gamma=cfg["gamma"], her_k=cfg["her_k"]
-    )
+    buffer = ReplayBuffer(max_episodes=2_000, gamma=cfg["gamma"], her_k=cfg["her_k"])
 
     os.makedirs(cfg["checkpoint_dir"], exist_ok=True)
 
@@ -216,34 +210,32 @@ def train(cfg: Optional[Dict] = None) -> Tuple[Actor, Critic]:
     ep_dists:   List[float] = []
     ep_valid:   List[float] = []
 
-    print(f"\nTraining for {cfg['n_episodes']} episodes …\n")
+    print(f"\nTraining for {cfg['n_episodes']} episodes ...\n")
 
     for ep_idx in range(cfg["n_episodes"]):
         actor.train(); critic.train()
-        ep = rollout(env, actor, device)
+        ep = rollout_gnn(env, actor, device)
         buffer.push(ep)
 
         total_r = sum(t.reward for t in ep.transitions)
         ep_rewards.append(total_r)
-
         achieved = ep.achieved_goal
         ep_valid.append(1.0 if achieved is not None else 0.0)
         if achieved is not None:
-            # Distance is the negated terminal reward (last transition).
             ep_dists.append(-ep.transitions[-1].reward)
 
         if len(buffer) >= 5:
-            batch = buffer.sample_transitions(cfg["batch_size"])
-            metrics = update(actor, critic, opt_actor, opt_critic, batch, cfg, device)
+            batch   = buffer.sample_transitions(cfg["batch_size"])
+            metrics = update_gnn(actor, critic, opt_actor, opt_critic, batch, cfg, device)
         else:
             metrics = {}
 
         if (ep_idx + 1) % cfg["log_every"] == 0:
-            w = cfg["log_every"]
-            r_mean  = float(np.mean(ep_rewards[-w:]))
-            v_pct   = float(np.mean(ep_valid[-w:])) * 100.0
-            d_mean  = float(np.mean(ep_dists[-w:])) if ep_dists else float("nan")
-            loss_s  = ""
+            w      = cfg["log_every"]
+            r_mean = float(np.mean(ep_rewards[-w:]))
+            v_pct  = float(np.mean(ep_valid[-w:])) * 100.0
+            d_mean = float(np.mean(ep_dists[-w:])) if ep_dists else float("nan")
+            loss_s = ""
             if metrics:
                 loss_s = (f"  actor={metrics['actor_loss']:.4f}"
                           f"  critic={metrics['critic_loss']:.4f}"
@@ -257,38 +249,32 @@ def train(cfg: Optional[Dict] = None) -> Tuple[Actor, Critic]:
                 "episode": ep_idx + 1,
                 "actor":   actor.state_dict(),
                 "critic":  critic.state_dict(),
-                "opt_actor":  opt_actor.state_dict(),
-                "opt_critic": opt_critic.state_dict(),
                 "config":  cfg,
             }, path)
-            print(f"  → checkpoint saved: {path}")
+            print(f"  -> checkpoint: {path}")
 
     return actor, critic
 
 
 # ---------------------------------------------------------------------------
-# CLI entry point
+# CLI
 # ---------------------------------------------------------------------------
 
 def _parse_args() -> Dict:
-    p = argparse.ArgumentParser(description="Train goal-conditioned fragment assembly agent.")
-    p.add_argument("--n_episodes",      type=int,   default=DEFAULT_CFG["n_episodes"])
-    p.add_argument("--n_frags",         type=int,   default=DEFAULT_CFG["n_frags"])
-    p.add_argument("--min_frag_count",  type=int,   default=DEFAULT_CFG["min_frag_count"])
-    p.add_argument("--n_targets",       type=int,   default=DEFAULT_CFG["n_targets"])
-    p.add_argument("--max_steps",       type=int,   default=DEFAULT_CFG["max_steps"])
-    p.add_argument("--hidden_dim",      type=int,   default=DEFAULT_CFG["hidden_dim"])
-    p.add_argument("--lr_actor",        type=float, default=DEFAULT_CFG["lr_actor"])
-    p.add_argument("--lr_critic",       type=float, default=DEFAULT_CFG["lr_critic"])
-    p.add_argument("--batch_size",      type=int,   default=DEFAULT_CFG["batch_size"])
-    p.add_argument("--her_k",           type=int,   default=DEFAULT_CFG["her_k"])
-    p.add_argument("--entropy_coef",    type=float, default=DEFAULT_CFG["entropy_coef"])
-    p.add_argument("--device",          type=str,   default=DEFAULT_CFG["device"])
-    p.add_argument("--checkpoint_dir",  type=str,   default=DEFAULT_CFG["checkpoint_dir"])
-    p.add_argument("--log_every",         type=int,   default=DEFAULT_CFG["log_every"])
-    p.add_argument("--checkpoint_every",  type=int,   default=DEFAULT_CFG["checkpoint_every"])
+    p = argparse.ArgumentParser()
+    p.add_argument("--n_episodes",       type=int,   default=DEFAULT_CFG["n_episodes"])
+    p.add_argument("--n_frags",          type=int,   default=DEFAULT_CFG["n_frags"])
+    p.add_argument("--n_targets",        type=int,   default=DEFAULT_CFG["n_targets"])
+    p.add_argument("--hidden_dim",       type=int,   default=DEFAULT_CFG["hidden_dim"])
+    p.add_argument("--gnn_dim",          type=int,   default=DEFAULT_CFG["gnn_dim"])
+    p.add_argument("--her_k",            type=int,   default=DEFAULT_CFG["her_k"])
+    p.add_argument("--entropy_coef",     type=float, default=DEFAULT_CFG["entropy_coef"])
+    p.add_argument("--device",           type=str,   default=DEFAULT_CFG["device"])
+    p.add_argument("--checkpoint_dir",   type=str,   default=DEFAULT_CFG["checkpoint_dir"])
+    p.add_argument("--log_every",        type=int,   default=DEFAULT_CFG["log_every"])
+    p.add_argument("--checkpoint_every", type=int,   default=DEFAULT_CFG["checkpoint_every"])
     args = p.parse_args()
-    cfg = dict(DEFAULT_CFG)
+    cfg  = dict(DEFAULT_CFG)
     cfg.update(vars(args))
     return cfg
 
