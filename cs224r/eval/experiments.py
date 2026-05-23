@@ -3,6 +3,9 @@ eval_experiments.py
 Evaluate PPO and GNN checkpoints on the fixed validation set.
 Saves val_results_ppo.json and val_results_gnn.json.
 """
+import sys as _sys
+from pathlib import Path as _Path
+_sys.path.insert(0, str(_Path(__file__).resolve().parent.parent))
 import _path_bootstrap  # noqa: F401
 
 import json
@@ -12,11 +15,10 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from data import load_fragment_library, load_target_distribution
+from env import load_fragment_library, load_target_distribution
 from env import MolEnv, TERMINATE
-from model import Actor
-from model_gnn import GNNActor
-from train import DEFAULT_CFG
+from models import Actor, GNNActor
+from training.a2c import DEFAULT_CFG
 
 VAL_SEED = 99991
 VAL_N    = 200
@@ -113,13 +115,17 @@ def main():
                                        n=DEFAULT_CFG["n_targets"])
     env = MolEnv(frags, targets, max_steps=DEFAULT_CFG["max_steps"])
 
+    _root = _Path(__file__).resolve().parent.parent
+    _res  = _root / "results"
+    _res.mkdir(exist_ok=True)
+
     if args.which in ("ppo", "both"):
         print("Evaluating PPO checkpoints ...")
-        eval_dir("checkpoints_ppo", "fp", eval_actor_fp, env, device, "val_results_ppo.json")
+        eval_dir(str(_root / "checkpoints_ppo"), "fp", eval_actor_fp, env, device, str(_res / "val_results_ppo.json"))
 
     if args.which in ("gnn", "both"):
         print("Evaluating GNN checkpoints ...")
-        eval_dir("checkpoints_gnn", "gnn", eval_actor_gnn, env, device, "val_results_gnn.json")
+        eval_dir(str(_root / "checkpoints_gnn"), "gnn", eval_actor_gnn, env, device, str(_res / "val_results_gnn.json"))
 
 
 if __name__ == "__main__":

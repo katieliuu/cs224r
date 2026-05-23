@@ -18,11 +18,11 @@ from rdkit.Chem import Draw, Descriptors
 from rdkit.Chem.QED import qed as _qed
 from rdkit.Chem.Draw import rdMolDraw2D
 
-from data import (
+from env import (
     load_fragment_library, load_target_distribution,
     denormalize_props, PROP_NAMES,
+    MolEnv, TERMINATE, _normalise_brics_smiles,
 )
-from env import MolEnv, TERMINATE, _normalise_brics_smiles
 from chem.build.molgraph_to_mol import molgraph_to_mol
 
 

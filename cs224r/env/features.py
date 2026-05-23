@@ -16,7 +16,7 @@ from rdkit.Chem.QED import qed as _rdkit_qed
 
 from core.structs import MolGraph
 from chem.build.molgraph_to_mol import molgraph_to_mol
-from data import normalize_props, GOAL_DIM
+from .data import normalize_props, GOAL_DIM
 
 # ---------------------------------------------------------------------------
 # Dimensions

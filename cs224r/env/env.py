@@ -42,8 +42,8 @@ from chem.build.molgraph_to_mol import molgraph_to_mol
 from chem.merge.merge import merge_by_labels
 from chem.dummy.query import dummy_indices
 
-from data import FragInfo, sample_target
-from features import (
+from .data import FragInfo, sample_target
+from .features import (
     state_features, action_features, compute_norm_properties,
     smiles_to_fp, STATE_DIM, ACTION_FEAT_DIM,
 )

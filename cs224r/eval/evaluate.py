@@ -23,6 +23,9 @@ Usage
 -----
   python evaluate.py [--checkpoint path/to/ckpt.pt] [--n_episodes 200]
 """
+import sys as _sys
+from pathlib import Path as _Path
+_sys.path.insert(0, str(_Path(__file__).resolve().parent.parent))
 import _path_bootstrap  # noqa: F401
 
 import argparse
@@ -31,10 +34,10 @@ from typing import Dict, List, Optional
 import numpy as np
 import torch
 
-from data import load_fragment_library, load_target_distribution
+from env import load_fragment_library, load_target_distribution
 from env import MolEnv, Action, TERMINATE
-from model import Actor
-from train import DEFAULT_CFG
+from models import Actor
+from training.a2c import DEFAULT_CFG
 
 
 # ---------------------------------------------------------------------------

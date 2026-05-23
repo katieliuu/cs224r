@@ -20,7 +20,7 @@ import _path_bootstrap  # noqa: F401
 
 import torch
 import torch.nn as nn
-from features import STATE_DIM, ACTION_FEAT_DIM
+from env.features import STATE_DIM, ACTION_FEAT_DIM
 
 
 def _mlp(in_dim: int, hidden_dim: int, out_dim: int, n_hidden: int = 2) -> nn.Sequential:

@@ -11,6 +11,9 @@ Outputs
   fig_comparison.png       all three methods: A2C+HER, PPO, GNN (train curves)
   fig_comparison_val.png   all three methods: validation curves only
 """
+import sys as _sys
+from pathlib import Path as _Path
+_sys.path.insert(0, str(_Path(__file__).resolve().parent.parent))
 import _path_bootstrap  # noqa: F401
 
 import re
@@ -187,9 +190,10 @@ def fig_comparison(ep_a2c, dist_a2c, ep_ppo, dist_ppo, ep_gnn, dist_gnn, out):
 
 def fig_comparison_val(out):
     """Validation curves for all three methods."""
-    val_a2c_ep, val_a2c  = load_val("val_results.json",     every=1000)
-    val_ppo_ep, val_ppo  = load_val("val_results_ppo.json", every=1000)
-    val_gnn_ep, val_gnn  = load_val("val_results_gnn.json", every=1000)
+    _res = _Path(__file__).resolve().parent.parent / "results"
+    val_a2c_ep, val_a2c  = load_val(str(_res / "val_results.json"),     every=1000)
+    val_ppo_ep, val_ppo  = load_val(str(_res / "val_results_ppo.json"), every=1000)
+    val_gnn_ep, val_gnn  = load_val(str(_res / "val_results_gnn.json"), every=1000)
 
     if val_a2c_ep is None and val_ppo_ep is None and val_gnn_ep is None:
         print("  No validation results found, skipping fig_comparison_val")
@@ -220,7 +224,12 @@ def fig_comparison_val(out):
 
 # ── main ───────────────────────────────────────────────────────────────────
 
-def main(log_path: str = "train_gpu.log"):
+def main(log_path: str = None):
+    _logs = _Path(__file__).resolve().parent.parent / "logs"
+    _figs = _Path(__file__).resolve().parent.parent / "results" / "figs"
+    _figs.mkdir(parents=True, exist_ok=True)
+    if log_path is None:
+        log_path = str(_logs / "train_gpu.log")
     print(f"Parsing {log_path} ...")
     ep, _, dist, _, _, _, entropy = parse_log(log_path)
     print(f"  {len(ep)} log points  |  ep {ep[0]}-{ep[-1]}")
@@ -228,27 +237,27 @@ def main(log_path: str = "train_gpu.log"):
     print(f"  entropy: init={entropy[0]:.3f}  final={entropy[-1]:.3f}")
     print()
 
-    fig_training_curve(ep, dist, "fig_training_curve.png")
-    fig_entropy(ep, entropy, "fig_entropy.png")
-    fig_combined(ep, dist, entropy, "fig_combined.png")
+    fig_training_curve(ep, dist, str(_figs / "fig_training_curve.png"))
+    fig_entropy(ep, entropy, str(_figs / "fig_entropy.png"))
+    fig_combined(ep, dist, entropy, str(_figs / "fig_combined.png"))
 
     # Experiment comparison (train curves)
-    ppo_exists = Path("train_ppo.log").exists()
-    gnn_exists = Path("train_gnn.log").exists()
-    if ppo_exists and gnn_exists:
+    ppo_log = _logs / "train_ppo.log"
+    gnn_log = _logs / "train_gnn.log"
+    if ppo_log.exists() and gnn_log.exists():
         print("Generating comparison figures ...")
-        ep_ppo, _, dist_ppo, *_ = parse_log("train_ppo.log")
-        ep_gnn, _, dist_gnn, *_ = parse_log("train_gnn.log")
-        fig_comparison(ep, dist, ep_ppo, dist_ppo, ep_gnn, dist_gnn, "fig_comparison.png")
+        ep_ppo, _, dist_ppo, *_ = parse_log(str(ppo_log))
+        ep_gnn, _, dist_gnn, *_ = parse_log(str(gnn_log))
+        fig_comparison(ep, dist, ep_ppo, dist_ppo, ep_gnn, dist_gnn, str(_figs / "fig_comparison.png"))
 
     # Validation comparison
-    fig_comparison_val("fig_comparison_val.png")
+    fig_comparison_val(str(_figs / "fig_comparison_val.png"))
 
     print("\nDone.")
 
 
 if __name__ == "__main__":
     p = argparse.ArgumentParser()
-    p.add_argument("--log", default="train_gpu.log")
+    p.add_argument("--log", default=None)
     args = p.parse_args()
     main(args.log)

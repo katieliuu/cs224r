@@ -22,7 +22,7 @@ from typing import List, Optional, Tuple, Dict, Any
 
 import numpy as np
 
-from data import GOAL_DIM
+from .data import GOAL_DIM
 
 
 # ---------------------------------------------------------------------------

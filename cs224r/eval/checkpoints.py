@@ -2,6 +2,9 @@
 eval_checkpoints.py
 Evaluate every checkpoint on a fixed held-out validation set and save results.
 """
+import sys as _sys
+from pathlib import Path as _Path
+_sys.path.insert(0, str(_Path(__file__).resolve().parent.parent))
 import _path_bootstrap  # noqa: F401
 
 import json
@@ -11,13 +14,14 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from data import load_fragment_library, load_target_distribution
+from env import load_fragment_library, load_target_distribution
 from env import MolEnv, TERMINATE
-from model import Actor
-from train import DEFAULT_CFG
+from models import Actor
+from training.a2c import DEFAULT_CFG
 
-CKPT_DIR = Path("checkpoints")
-OUT_FILE  = Path("val_results.json")
+_ROOT    = _Path(__file__).resolve().parent.parent
+CKPT_DIR = _ROOT / "checkpoints"
+OUT_FILE  = _ROOT / "results" / "val_results.json"
 VAL_SEED  = 99991          # fixed seed for reproducible validation episodes
 VAL_N     = 200
 

@@ -21,6 +21,9 @@ Usage
   python trajectory.py [--n_frags 50] [--max_steps 6] [--seeds 7 42 99]
   python trajectory.py --checkpoint checkpoints/ckpt_ep6000.pt [--greedy]
 """
+import sys as _sys
+from pathlib import Path as _Path
+_sys.path.insert(0, str(_Path(__file__).resolve().parent.parent))
 import _path_bootstrap  # noqa: F401
 
 import argparse
@@ -40,10 +43,10 @@ import torch
 from rdkit import Chem
 from rdkit.Chem.Draw import rdMolDraw2D
 
-from data import load_fragment_library, load_target_distribution, denormalize_props
+from env import load_fragment_library, load_target_distribution, denormalize_props
 from env import MolEnv, TERMINATE
-from features import compute_norm_properties
-from model import Actor
+from env import compute_norm_properties
+from models import Actor
 from chem.build.molgraph_to_mol import molgraph_to_mol
 from core.structs import MolGraph
 

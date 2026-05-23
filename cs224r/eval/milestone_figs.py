@@ -2,6 +2,9 @@
 make_milestone_figs.py
 Generate all milestone 1 figures into milestone1_figs/{baseline,exp1,exp2,combined}/.
 """
+import sys as _sys
+from pathlib import Path as _Path
+_sys.path.insert(0, str(_Path(__file__).resolve().parent.parent))
 import _path_bootstrap  # noqa: F401
 
 import re
@@ -17,7 +20,8 @@ import matplotlib.ticker as mticker
 _SD = Path("/home/ayamin/projects/cs273b/asmani-branch/plot/scienceplots/styles")
 plt.style.use([str(_SD / "science.mplstyle"), str(_SD / "journals" / "ieee.mplstyle")])
 
-OUT  = Path("milestone1_figs")
+_ROOT = _Path(__file__).resolve().parent.parent
+OUT  = _ROOT / "results" / "milestone1_figs"
 BASE = OUT / "baseline"
 E1   = OUT / "exp1"
 E2   = OUT / "exp2"
@@ -84,13 +88,13 @@ def save(fig, path):
 # Load all data
 # ---------------------------------------------------------------------------
 
-ep_a, dist_a, ent_a = parse_log("train_gpu.log")
-ep_p, dist_p, ent_p = parse_log("train_ppo.log")
-ep_g, dist_g, ent_g = parse_log("train_gnn.log")
+ep_a, dist_a, ent_a = parse_log(str(_ROOT / "logs" / "train_gpu.log"))
+ep_p, dist_p, ent_p = parse_log(str(_ROOT / "logs" / "train_ppo.log"))
+ep_g, dist_g, ent_g = parse_log(str(_ROOT / "logs" / "train_gnn.log"))
 
-val_ep_a, val_a = load_val("val_results.json")
-val_ep_p, val_p = load_val("val_results_ppo.json")
-val_ep_g, val_g = load_val("val_results_gnn.json")
+val_ep_a, val_a = load_val(str(_ROOT / "results" / "val_results.json"))
+val_ep_p, val_p = load_val(str(_ROOT / "results" / "val_results_ppo.json"))
+val_ep_g, val_g = load_val(str(_ROOT / "results" / "val_results_gnn.json"))
 
 rand_a = float(np.mean(dist_a[:5]))
 rand_p = float(np.mean(dist_p[:5]))

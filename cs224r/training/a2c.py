@@ -15,6 +15,9 @@ Usage
   python train.py                              # default config
   python train.py --n_episodes 500            # quick smoke-test
 """
+import sys as _sys
+from pathlib import Path as _Path
+_sys.path.insert(0, str(_Path(__file__).resolve().parent.parent))
 import _path_bootstrap  # noqa: F401
 
 import argparse
@@ -26,10 +29,15 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 
-from data import load_fragment_library, load_target_distribution
+try:
+    import wandb as _wandb
+except ImportError:
+    _wandb = None
+
+from env import load_fragment_library, load_target_distribution
 from env import MolEnv, Action, TERMINATE, StepResult
-from model import Actor, Critic
-from replay import ReplayBuffer, Episode, Transition
+from models import Actor, Critic
+from env import ReplayBuffer, Episode, Transition
 
 
 # ---------------------------------------------------------------------------
@@ -56,10 +64,13 @@ DEFAULT_CFG: Dict = dict(
     entropy_coef=0.005,
     critic_coef=0.5,
     grad_clip=1.0,
-    # --- logging ---
+    # --- logging / W&B ---
     log_every=50,
     checkpoint_every=500,
     checkpoint_dir="checkpoints",
+    exp_name="a2c_run",
+    seed=1,
+    use_wandb=False,
     device="cuda" if __import__("torch").cuda.is_available() else "cpu",
 )
 
@@ -184,6 +195,17 @@ def train(cfg: Optional[Dict] = None) -> Tuple[Actor, Critic]:
     if cfg is None:
         cfg = DEFAULT_CFG
 
+    torch.manual_seed(cfg["seed"])
+    np.random.seed(cfg["seed"])
+
+    if cfg.get("use_wandb") and _wandb is not None:
+        _wandb.init(
+            project="cs224r-fragment-assembly",
+            name=cfg["exp_name"],
+            config={k: v for k, v in cfg.items() if isinstance(v, (int, float, str, bool))},
+            tags=["a2c"],
+        )
+
     device = torch.device(cfg["device"])
 
     print("Loading fragment library …")
@@ -250,6 +272,17 @@ def train(cfg: Optional[Dict] = None) -> Tuple[Actor, Critic]:
                           f"  H={metrics['entropy']:.3f}")
             print(f"[{ep_idx+1:5d}] reward={r_mean:+.3f}  "
                   f"dist={d_mean:.3f}  valid={v_pct:.1f}%{loss_s}")
+            if cfg.get("use_wandb") and _wandb is not None:
+                log = {
+                    "train/mean_reward": r_mean,
+                    "train/mean_dist":   d_mean,
+                    "train/valid_pct":   v_pct,
+                }
+                if metrics:
+                    log["train/actor_loss"]  = metrics["actor_loss"]
+                    log["train/critic_loss"] = metrics["critic_loss"]
+                    log["train/entropy"]     = metrics["entropy"]
+                _wandb.log(log, step=ep_idx + 1)
 
         if (ep_idx + 1) % cfg["checkpoint_every"] == 0:
             path = os.path.join(cfg["checkpoint_dir"], f"ckpt_ep{ep_idx+1}.pt")
@@ -262,6 +295,9 @@ def train(cfg: Optional[Dict] = None) -> Tuple[Actor, Critic]:
                 "config":  cfg,
             }, path)
             print(f"  → checkpoint saved: {path}")
+
+    if cfg.get("use_wandb") and _wandb is not None:
+        _wandb.finish()
 
     return actor, critic
 
@@ -287,6 +323,9 @@ def _parse_args() -> Dict:
     p.add_argument("--checkpoint_dir",  type=str,   default=DEFAULT_CFG["checkpoint_dir"])
     p.add_argument("--log_every",         type=int,   default=DEFAULT_CFG["log_every"])
     p.add_argument("--checkpoint_every",  type=int,   default=DEFAULT_CFG["checkpoint_every"])
+    p.add_argument("--exp_name",   type=str,            default=DEFAULT_CFG["exp_name"])
+    p.add_argument("--seed",       type=int,            default=DEFAULT_CFG["seed"])
+    p.add_argument("--use_wandb",  action="store_true", default=False)
     args = p.parse_args()
     cfg = dict(DEFAULT_CFG)
     cfg.update(vars(args))

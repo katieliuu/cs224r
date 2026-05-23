@@ -32,8 +32,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from core.structs import MolGraph
-from features import ACTION_FEAT_DIM
-from data import GOAL_DIM
+from env.features import ACTION_FEAT_DIM
+from env.data import GOAL_DIM
 
 # ---------------------------------------------------------------------------
 # Graph featurisation

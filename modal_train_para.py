@@ -1,0 +1,58 @@
+"""
+modal_train_para.py
+Launch the same experiment across multiple seeds in parallel on Modal.
+
+Usage
+-----
+  modal run --detach modal_train_para.py --algo a2c --exp-name sweep --use-wandb
+  modal run --detach modal_train_para.py --algo gnn --exp-name gnn-sweep --seeds 1 2 3 4
+"""
+from modal_config import app, train
+
+SEEDS = [1, 2, 3]
+
+
+@app.local_entrypoint()
+def main(
+    algo: str = "a2c",
+    exp_name: str = "modal_sweep",
+    n_episodes: int = 10_000,
+    n_frags: int = 200,
+    n_targets: int = 300,
+    hidden_dim: int = 256,
+    her_k: int = 4,
+    entropy_coef: float = 0.005,
+    lr_actor: float = 3e-4,
+    lr_critic: float = 1e-3,
+    log_every: int = 50,
+    checkpoint_every: int = 500,
+    use_wandb: bool = False,
+):
+    def build_args(seed: int) -> list[str]:
+        args = [
+            "--seed",             str(seed),
+            "--n_episodes",       str(n_episodes),
+            "--n_frags",          str(n_frags),
+            "--n_targets",        str(n_targets),
+            "--hidden_dim",       str(hidden_dim),
+            "--her_k",            str(her_k),
+            "--entropy_coef",     str(entropy_coef),
+            "--lr_actor",         str(lr_actor),
+            "--lr_critic",        str(lr_critic),
+            "--log_every",        str(log_every),
+            "--checkpoint_every", str(checkpoint_every),
+            "--checkpoint_dir",   f"/mnt/results/checkpoints_{algo}_seed{seed}",
+            "--device",           "cuda",
+        ]
+        if use_wandb:
+            args.append("--use_wandb")
+        return args
+
+    configs = [
+        (algo, f"{exp_name}_seed{seed}", build_args(seed))
+        for seed in SEEDS
+    ]
+
+    print(f"Launching {len(configs)} parallel {algo.upper()} runs (seeds {SEEDS}) …")
+    for _ in train.starmap(configs):
+        pass
