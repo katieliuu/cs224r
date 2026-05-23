@@ -3,10 +3,10 @@ plan.txt
 commit-push.config.json
 224r_*.md
 pipeline_summary.md
-.claude/
-.codex/
-.agent/
-.agents/
+.*
+!.vscode
+!.vscode/**
+!.gitignore
 fg_viz_*.png
 checkpoints/
 *.pt
