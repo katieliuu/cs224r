@@ -8,8 +8,14 @@ _THIS_DIR = Path(__file__).resolve().parent  # .../cs224r/cs224r/
 if str(_THIS_DIR) not in sys.path:
     sys.path.insert(0, str(_THIS_DIR))
 
-# Walk up to find repo root (contains chem/ and core/).
+# Walk up to find small-molecule-mod-toolkit/ (contains chem/ and core/).
 for _candidate in [_THIS_DIR.parent, *_THIS_DIR.parent.parents]:
+    _toolkit = _candidate / "small-molecule-mod-toolkit"
+    if _toolkit.is_dir() and (_toolkit / "chem").is_dir() and (_toolkit / "core").is_dir():
+        if str(_toolkit) not in sys.path:
+            sys.path.insert(0, str(_toolkit))
+        break
+    # Fallback: legacy layout with chem/core directly at this level.
     if (_candidate / "chem").is_dir() and (_candidate / "core").is_dir():
         if str(_candidate) not in sys.path:
             sys.path.insert(0, str(_candidate))
