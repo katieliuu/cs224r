@@ -146,9 +146,8 @@ echo
 PUSH_FLAGS=""
 $FORCE && PUSH_FLAGS="--force"
 
-mapfile -t REMOTE_LIST <<< "$REMOTES"
-
-for REMOTE_URL in "${REMOTE_LIST[@]}"; do
+while IFS= read -r REMOTE_URL; do
+    [[ -z "$REMOTE_URL" ]] && continue
     # Inject credentials: https://user:token@github.com/...
     AUTH_URL="${REMOTE_URL/https:\/\//https://$USERNAME:$TOKEN@}"
     DISPLAY_URL="${REMOTE_URL}"   # never print the token
@@ -156,7 +155,7 @@ for REMOTE_URL in "${REMOTE_LIST[@]}"; do
     echo "Pushing to $DISPLAY_URL …"
     git push $PUSH_FLAGS "$AUTH_URL" HEAD:main
     echo "  done."
-done
+done <<< "$REMOTES"
 
 echo
 echo "All done."
