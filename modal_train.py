@@ -14,6 +14,7 @@ from modal_config import app, train
 @app.local_entrypoint()
 def main(
     algo: str = "a2c",
+    encoder: str = "fp",
     exp_name: str = "modal_run",
     seed: int = 1,
     n_episodes: int = 10_000,
@@ -46,6 +47,7 @@ def main(
         "--n_frags",          str(n_frags),
         "--n_targets",        str(n_targets),
         "--goal_properties",  goal_properties,
+        "--encoder",          encoder,
         "--hidden_dim",       str(hidden_dim),
         "--her_k",            str(her_k),
         "--entropy_coef",     str(entropy_coef),
