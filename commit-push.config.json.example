@@ -1,8 +1,0 @@
-{
-  "_comment": "Copy this file to commit-push.config.json, fill in your details. It is gitignored.",
-  "username": "your-github-username",
-  "token_file": "/path/to/your/github-token.txt",
-  "remotes": [
-    "https://github.com/katieliuu/cs224r.git"
-  ]
-}
