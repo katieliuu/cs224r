@@ -45,7 +45,13 @@ from chem.dummy.query import dummy_indices
 from .data import FragInfo, sample_target
 from .features import (
     state_features, action_features, compute_norm_properties,
-    smiles_to_fp, STATE_DIM, ACTION_FEAT_DIM,
+    smiles_to_fp, state_dim as feature_state_dim, ACTION_FEAT_DIM,
+)
+from .properties import DEFAULT_PROPERTY_NAMES, parse_property_names
+from .rewards import (
+    OPEN_DUMMY_PENALTY,
+    reward_from_context,
+    terminal_reward,
 )
 
 
@@ -85,9 +91,6 @@ BRICS_COMPAT: Dict[int, Set[int]] = {
     15: {3, 5, 6, 8, 9, 10, 11, 13, 14, 16},
     16: {3, 5, 6, 8, 9, 10, 11, 13, 14, 15, 16},
 }
-
-OPEN_DUMMY_PENALTY = 0.05   # reward penalty per remaining dummy at termination
-
 
 def _brics_compatible(mol_label: str, frag_label: str) -> bool:
     """Return True iff (mol_type, frag_type) is a valid BRICS bond pair."""
@@ -158,10 +161,20 @@ class MolEnv:
         fragment_library: List[FragInfo],
         target_distribution: np.ndarray,   # (N, GOAL_DIM) normalised
         max_steps: int = 8,
+        property_names: Optional[Tuple[str, ...]] = None,
+        reward_config: Optional[Dict[str, Any]] = None,
     ):
         self.library = fragment_library
         self.targets = target_distribution
         self.max_steps = max_steps
+        self.property_names = parse_property_names(property_names, default=DEFAULT_PROPERTY_NAMES)
+        self.goal_dim = len(self.property_names)
+        if target_distribution.shape[1] != self.goal_dim:
+            raise ValueError(
+                f"Target distribution has dim {target_distribution.shape[1]}, "
+                f"but property_names imply goal_dim {self.goal_dim}."
+            )
+        self.reward_config = reward_config or {"mode": "sparse"}
 
         self.frag_fps: List[np.ndarray] = [
             smiles_to_fp(_normalise_brics_smiles(f.smiles)) for f in fragment_library
@@ -195,9 +208,11 @@ class MolEnv:
 
     def step(self, action: Action) -> StepResult:
         self._step += 1
+        prev_open = len(self._open_labels())
+        prev_props = self._current_surrogate_props()
 
         if action.is_terminate or self._step >= self.max_steps:
-            return self._finalise()
+            return self._finalise(prev_props=prev_props, prev_open=prev_open)
 
         frag_mg = self._frag_graph(action.frag_idx)
         if frag_mg is None:
@@ -218,12 +233,31 @@ class MolEnv:
         self._mol = merged
 
         if not self._open_labels():
-            return self._finalise()
+            return self._finalise(prev_props=prev_props, prev_open=prev_open)
 
         state = state_features(self._mol, self._goal)
         valid = self._valid_actions()
-        return StepResult(state=state, reward=0.0, done=False,
-                          info={"valid_actions": valid})
+        next_open = len(self._open_labels())
+        next_props = self._current_surrogate_props()
+        reward_ctx = {
+            "kind": "intermediate",
+            "base_reward": 0.0,
+            "prev_props": None if prev_props is None else prev_props.copy(),
+            "next_props": None if next_props is None else next_props.copy(),
+            "prev_open": prev_open,
+            "next_open": next_open,
+        }
+        reward = reward_from_context(reward_ctx, self._goal, self.reward_config)
+        return StepResult(
+            state=state,
+            reward=reward,
+            done=False,
+            info={
+                "valid_actions": valid,
+                "surrogate_props": None if next_props is None else next_props.copy(),
+                "reward_ctx": reward_ctx,
+            },
+        )
 
     # ------------------------------------------------------------------
     # Action enumeration
@@ -287,7 +321,11 @@ class MolEnv:
     # Terminal helper
     # ------------------------------------------------------------------
 
-    def _finalise(self) -> StepResult:
+    def _finalise(
+        self,
+        prev_props: Optional[np.ndarray] = None,
+        prev_open: Optional[int] = None,
+    ) -> StepResult:
         """
         Compute terminal reward.
         1. Cap any remaining dummy atoms with H (always yields a closed mol).
@@ -310,31 +348,62 @@ class MolEnv:
             except Exception:
                 pass
 
-        props_norm = compute_norm_properties(closed) if closed is not None else None
-        open_pen   = OPEN_DUMMY_PENALTY * n_open
-        state      = state_features(self._mol, self._goal)
+        props_norm = (
+            compute_norm_properties(closed, self.property_names)
+            if closed is not None else None
+        )
+        state = state_features(self._mol, self._goal)
 
-        if props_norm is None:
-            return StepResult(
-                state=state, reward=-2.0 - open_pen, done=True,
-                info={"valid": False, "achieved_goal": None,
-                      "n_open_dummies": n_open, "valid_actions": [TERMINATE]},
-            )
+        reward_ctx = {
+            "kind": "terminal",
+            "prev_props": None if prev_props is None else prev_props.copy(),
+            "final_props": None if props_norm is None else props_norm.copy(),
+            "prev_open": n_open if prev_open is None else prev_open,
+            "final_open": n_open,
+            "open_dummy_penalty": OPEN_DUMMY_PENALTY,
+        }
+        reward = reward_from_context(reward_ctx, self._goal, self.reward_config)
+        _, dist = terminal_reward(props_norm, self._goal, n_open, OPEN_DUMMY_PENALTY)
 
-        dist = float(np.linalg.norm(props_norm - self._goal))
         return StepResult(
             state=state,
-            reward=-(dist + open_pen),
+            reward=reward,
             done=True,
-            info={"valid": True, "achieved_goal": props_norm.copy(),
-                  "n_open_dummies": n_open, "valid_actions": [TERMINATE]},
+            info={
+                "valid": props_norm is not None,
+                "achieved_goal": None if props_norm is None else props_norm.copy(),
+                "n_open_dummies": n_open,
+                "valid_actions": [TERMINATE],
+                "surrogate_props": None if props_norm is None else props_norm.copy(),
+                "terminal_distance": dist,
+                "reward_ctx": reward_ctx,
+            },
         )
 
     def _soft_fail(self, reason: str) -> StepResult:
         state = state_features(self._mol, self._goal)
         valid = self._valid_actions()
-        return StepResult(state=state, reward=-0.1, done=False,
-                          info={"error": reason, "valid_actions": valid})
+        reward_ctx = {"kind": "constant", "value": -0.1}
+        return StepResult(
+            state=state,
+            reward=-0.1,
+            done=False,
+            info={"error": reason, "valid_actions": valid, "reward_ctx": reward_ctx},
+        )
+
+    def _current_surrogate_props(self) -> Optional[np.ndarray]:
+        mol = molgraph_to_mol(self._mol, sanitize=False, remove_hs=False)
+        if mol is None:
+            return None
+
+        closed = _cap_dummies_with_h(mol)
+        if closed is None:
+            try:
+                Chem.SanitizeMol(mol, catchErrors=True)
+                closed = mol
+            except Exception:
+                return None
+        return compute_norm_properties(closed, self.property_names)
 
     # ------------------------------------------------------------------
     # Fragment graph cache
@@ -348,7 +417,7 @@ class MolEnv:
 
     @property
     def state_dim(self) -> int:
-        return STATE_DIM
+        return feature_state_dim(self.goal_dim)
 
     @property
     def action_feat_dim(self) -> int:

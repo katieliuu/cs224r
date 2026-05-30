@@ -22,7 +22,7 @@ from typing import List, Optional, Tuple, Dict, Any
 
 import numpy as np
 
-from .data import GOAL_DIM
+from .rewards import reward_from_context
 
 
 # ---------------------------------------------------------------------------
@@ -64,10 +64,14 @@ class ReplayBuffer:
         max_episodes: int = 2_000,
         gamma: float = 0.99,
         her_k: int = 4,
+        goal_dim: Optional[int] = None,
+        reward_config: Optional[Dict[str, Any]] = None,
     ):
         self.max_episodes = max_episodes
         self.gamma = gamma
         self.her_k = her_k
+        self.goal_dim = goal_dim
+        self.reward_config = reward_config or {"mode": "sparse"}
         self._episodes: List[Episode] = []
 
     def push(self, ep: Episode) -> None:
@@ -123,17 +127,22 @@ class ReplayBuffer:
         achieved = ep.achieved_goal
         if achieved is None:
             return []
+        goal_dim = self.goal_dim or len(achieved)
 
         relabelled: List[Transition] = []
         for t in ep.transitions:
-            # Swap the goal embedded in the last GOAL_DIM elements of state.
+            # Swap the goal embedded in the last goal_dim elements of state.
             new_s = t.state.copy()
-            new_s[-GOAL_DIM:] = achieved
+            new_s[-goal_dim:] = achieved
             new_ns = t.next_state.copy()
-            new_ns[-GOAL_DIM:] = achieved
+            new_ns[-goal_dim:] = achieved
 
-            # Terminal step has zero distance to itself → reward 0.
-            new_r = 0.0 if t.done else t.reward
+            reward_ctx = t.info.get("reward_ctx")
+            new_r = (
+                reward_from_context(reward_ctx, achieved, self.reward_config)
+                if reward_ctx is not None else
+                (0.0 if t.done else t.reward)
+            )
 
             relabelled.append(Transition(
                 state=new_s,
@@ -144,7 +153,7 @@ class ReplayBuffer:
                 next_action_feats=t.next_action_feats,
                 done=t.done,
                 goal=achieved,
-                info=t.info,
+                info={**t.info, "her_goal": achieved.copy()},
             ))
 
         returns = self._mc_returns([t.reward for t in relabelled])

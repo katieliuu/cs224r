@@ -16,30 +16,29 @@ import _path_bootstrap  # noqa: F401
 
 import heapq
 from dataclasses import dataclass
-from typing import List
+from typing import List, Optional, Sequence
 
 import numpy as np
 import psutil
 import pyarrow.parquet as pq
+from rdkit import Chem
+
+from .properties import (
+    DEFAULT_PROPERTY_NAMES,
+    compute_raw_properties,
+    denormalize_props,
+    normalize_props,
+    parse_property_names,
+    property_bounds,
+)
 
 # ---------------------------------------------------------------------------
-# Property normalisation constants (fixed, drug-like ranges)
+# Default property set (backward-compatible aliases)
 # ---------------------------------------------------------------------------
-PROP_NAMES = ("sLogP", "QED", "TPSA")
-PROP_MIN   = np.array([-5.0, 0.0,   0.0], dtype=np.float32)
-PROP_MAX   = np.array([10.0, 1.0, 200.0], dtype=np.float32)
-PROP_RANGE = PROP_MAX - PROP_MIN          # [15, 1, 200]
-GOAL_DIM   = 3
-
-
-def normalize_props(raw: np.ndarray) -> np.ndarray:
-    """Clip raw (logp, qed, tpsa) to [0, 1]."""
-    return (np.clip(raw, PROP_MIN, PROP_MAX) - PROP_MIN) / PROP_RANGE
-
-
-def denormalize_props(normed: np.ndarray) -> np.ndarray:
-    """Inverse of normalize_props."""
-    return normed * PROP_RANGE + PROP_MIN
+PROP_NAMES = DEFAULT_PROPERTY_NAMES
+PROP_MIN, PROP_MAX = property_bounds(PROP_NAMES)
+PROP_RANGE = PROP_MAX - PROP_MIN
+GOAL_DIM = len(PROP_NAMES)
 
 
 # ---------------------------------------------------------------------------
@@ -56,6 +55,15 @@ def _check_headroom(max_mem_gb: float, label: str) -> None:
         raise MemoryError(
             f"{label}: only {avail:.1f} GB RAM available; refusing to load more data."
         )
+
+
+def _is_missing_scalar(value: object) -> bool:
+    if value is None:
+        return True
+    try:
+        return bool(np.isnan(value))  # type: ignore[arg-type]
+    except Exception:
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -144,6 +152,7 @@ def load_fragment_library(
 def load_target_distribution(
     parquet_path: str,
     n: int = 1_000,
+    property_names: Optional[Sequence[str]] = None,
     max_mem_gb: float = 32.0,
 ) -> np.ndarray:
     """
@@ -152,11 +161,28 @@ def load_target_distribution(
     reached.  Each parents row group is ~280 MB for all 13 columns; we only
     read 3 columns (~65 MB each).
     """
-    COLS = ["sLogP", "QED", "TPSA"]
+    property_names = parse_property_names(property_names)
 
     pf         = pq.ParquetFile(parquet_path)
     n_groups   = pf.metadata.num_row_groups
     used_start = psutil.virtual_memory().used / 1e9
+    schema_names = set(pf.schema.names)
+
+    available_props = [name for name in property_names if name in schema_names]
+    missing_props = [name for name in property_names if name not in schema_names]
+    smiles_col = next(
+        (name for name in ("smiles", "canonical_smiles", "parent_smiles", "SMILES") if name in schema_names),
+        None,
+    )
+    if missing_props and smiles_col is None:
+        raise RuntimeError(
+            f"Target load requested properties {missing_props}, but parquet has no matching columns "
+            f"and no SMILES column for recomputation."
+        )
+
+    cols_to_read = list(available_props)
+    if smiles_col is not None and missing_props:
+        cols_to_read.append(smiles_col)
 
     rows: list = []
     for g in range(n_groups):
@@ -172,20 +198,44 @@ def load_target_distribution(
 
         _check_headroom(max_mem_gb, "load_target_distribution")
 
-        batch = pf.read_row_group(g, columns=COLS).to_pandas().dropna()
-        need  = n - len(rows)
-        rows.append(batch.head(need))
+        batch = pf.read_row_group(g, columns=cols_to_read).to_pandas()
+
+        if missing_props:
+            prop_rows = []
+            for _, row in batch.iterrows():
+                values = {name: row[name] for name in available_props}
+                smiles = row.get(smiles_col)
+                if any(name not in values or _is_missing_scalar(values[name]) for name in available_props):
+                    continue
+                if missing_props:
+                    if not isinstance(smiles, str) or not smiles:
+                        continue
+                    mol = Chem.MolFromSmiles(smiles)
+                    if mol is None:
+                        continue
+                    raw_missing = compute_raw_properties(mol, missing_props)
+                    if raw_missing is None:
+                        continue
+                    for name, value in zip(missing_props, raw_missing):
+                        values[name] = value
+                prop_rows.append([values[name] for name in property_names])
+                if len(prop_rows) >= (n - sum(len(chunk) for chunk in rows)):
+                    break
+            if prop_rows:
+                rows.append(np.asarray(prop_rows, dtype=np.float32))
+        else:
+            batch = batch[list(property_names)].dropna()
+            need = n - sum(len(chunk) for chunk in rows)
+            rows.append(batch.head(need).values.astype(np.float32))
 
     if not rows:
         raise RuntimeError("No target rows loaded — check parquet path and columns.")
 
-    import pandas as pd
-    df  = pd.concat(rows, ignore_index=True).head(n)
-    raw = df[COLS].values.astype(np.float32)
+    raw = np.concatenate(rows, axis=0)[:n]
 
     print(f"  [data] target distribution: {len(raw)} molecules "
           f"(scanned {min(g+1, n_groups)}/{n_groups} row groups)")
-    return normalize_props(raw)
+    return normalize_props(raw, property_names)
 
 
 def sample_target(targets: np.ndarray) -> np.ndarray:

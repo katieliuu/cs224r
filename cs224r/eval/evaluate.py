@@ -34,7 +34,7 @@ from typing import Dict, List, Optional
 import numpy as np
 import torch
 
-from env import load_fragment_library, load_target_distribution
+from env import load_fragment_library, load_target_distribution, parse_property_names
 from env import MolEnv, Action, TERMINATE
 from models import Actor
 from training.a2c import DEFAULT_CFG
@@ -174,18 +174,30 @@ def main():
     p.add_argument("--n_frags",       type=int,   default=DEFAULT_CFG["n_frags"])
     p.add_argument("--min_frag_count",type=int,   default=DEFAULT_CFG["min_frag_count"])
     p.add_argument("--n_targets",     type=int,   default=DEFAULT_CFG["n_targets"])
+    p.add_argument("--goal_properties", type=str,  default=DEFAULT_CFG["goal_properties"])
     p.add_argument("--hidden_dim",    type=int,   default=DEFAULT_CFG["hidden_dim"])
     p.add_argument("--device",        type=str,   default="cuda" if __import__("torch").cuda.is_available() else "cpu")
     args = p.parse_args()
 
     device = torch.device(args.device)
 
-    frags   = load_fragment_library(DEFAULT_CFG["fragments_parquet"],
-                                    n=args.n_frags,
-                                    min_count=args.min_frag_count)
-    targets = load_target_distribution(DEFAULT_CFG["parents_parquet"],
-                                       n=args.n_targets)
-    env = MolEnv(frags, targets, max_steps=DEFAULT_CFG["max_steps"])
+    property_names = parse_property_names(args.goal_properties)
+    frags   = load_fragment_library(
+        DEFAULT_CFG["fragments_parquet"],
+        n=args.n_frags,
+        min_count=args.min_frag_count,
+    )
+    targets = load_target_distribution(
+        DEFAULT_CFG["parents_parquet"],
+        n=args.n_targets,
+        property_names=property_names,
+    )
+    env = MolEnv(
+        frags,
+        targets,
+        max_steps=DEFAULT_CFG["max_steps"],
+        property_names=property_names,
+    )
 
     # --- baselines ---
     _print_metrics("Baseline: random policy",
@@ -195,8 +207,27 @@ def main():
 
     # --- trained agent ---
     if args.checkpoint:
-        actor = Actor(hidden_dim=args.hidden_dim).to(device)
         ckpt  = torch.load(args.checkpoint, map_location=device)
+        ckpt_cfg = ckpt.get("config", {})
+        ckpt_property_names = parse_property_names(
+            ckpt_cfg.get("goal_properties", args.goal_properties)
+        )
+        if ckpt_property_names != property_names:
+            targets = load_target_distribution(
+                DEFAULT_CFG["parents_parquet"],
+                n=args.n_targets,
+                property_names=ckpt_property_names,
+            )
+            env = MolEnv(
+                frags,
+                targets,
+                max_steps=ckpt_cfg.get("max_steps", DEFAULT_CFG["max_steps"]),
+                property_names=ckpt_property_names,
+            )
+        actor = Actor(
+            state_dim=env.state_dim,
+            hidden_dim=ckpt_cfg.get("hidden_dim", args.hidden_dim),
+        ).to(device)
         actor.load_state_dict(ckpt["actor"])
         _print_metrics(f"Trained agent ({args.checkpoint})",
                        evaluate(actor, env, n_episodes=args.n_episodes,

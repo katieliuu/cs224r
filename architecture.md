@@ -12,7 +12,9 @@ Each episode is a Markov decision process over partial molecules:
 - **Goal** $g = [\text{LogP}_\text{norm},\, \text{QED}_\text{norm},\, \text{TPSA}_\text{norm}]$, sampled from a held-out distribution of drug-like molecules.
 - **Action**: attach a fragment from the library at a typed dummy site, or terminate. The action space is enumerated fresh at each step.
 - **Terminal reward**: $r = -\|\phi_\text{norm}(m_\text{capped}) - g\|_2 - 0.05 \cdot n_\text{open}$, where $m_\text{capped}$ replaces all remaining dummy atoms with H before property computation, and $n_\text{open}$ is the number of unclosed attachment sites.
-- **Intermediate reward**: 0 (sparse).
+- **Intermediate reward**: 0 (sparse) by default.
+- **Experiment: property-surrogate shaping**: optionally reward per-step improvement in capped-partial property match plus a small dummy-closing bonus, while keeping the terminal reward distance-based.
+- **Generalised property sets**: experiments can choose arbitrary `goal_properties` (for the target vector) and `reward_properties` (for dense-reward ablations over a subset of those properties).
 
 ---
 

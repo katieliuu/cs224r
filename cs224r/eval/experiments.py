@@ -15,7 +15,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from env import load_fragment_library, load_target_distribution
+from env import load_fragment_library, load_target_distribution, parse_property_names
 from env import MolEnv, TERMINATE
 from models import Actor, GNNActor
 from training.a2c import DEFAULT_CFG
@@ -74,7 +74,7 @@ def eval_actor_gnn(actor, env, n=VAL_N, device=torch.device("cpu")):
     return float(np.mean(dists)) if dists else float("nan")
 
 
-def eval_dir(ckpt_dir, actor_type, eval_fn, env, device, out_file):
+def eval_dir(ckpt_dir, actor_type, eval_fn, frags, device, out_file):
     ckpts = sorted(Path(ckpt_dir).glob("ckpt_ep*.pt"),
                    key=lambda p: int(p.stem.split("ep")[1]))
     results = {}
@@ -82,13 +82,26 @@ def eval_dir(ckpt_dir, actor_type, eval_fn, env, device, out_file):
         ep   = int(ckpt_path.stem.split("ep")[1])
         ckpt = torch.load(ckpt_path, map_location=device)
         cfg  = ckpt.get("config", {})
+        property_names = parse_property_names(cfg.get("goal_properties", DEFAULT_CFG["goal_properties"]))
+        targets = load_target_distribution(
+            cfg.get("parents_parquet", DEFAULT_CFG["parents_parquet"]),
+            n=cfg.get("n_targets", DEFAULT_CFG["n_targets"]),
+            property_names=property_names,
+        )
+        env = MolEnv(
+            frags,
+            targets,
+            max_steps=cfg.get("max_steps", DEFAULT_CFG["max_steps"]),
+            property_names=property_names,
+        )
 
         if actor_type == "fp":
-            actor = Actor(hidden_dim=cfg.get("hidden_dim", 256)).to(device)
+            actor = Actor(state_dim=env.state_dim, hidden_dim=cfg.get("hidden_dim", 256)).to(device)
             actor.load_state_dict(ckpt["actor"])
         else:
             actor = GNNActor(
                 gnn_dim=cfg.get("gnn_dim", 128),
+                goal_dim=env.goal_dim,
                 hidden_dim=cfg.get("hidden_dim", 256),
             ).to(device)
             actor.load_state_dict(ckpt["actor"])
@@ -111,21 +124,17 @@ def main():
     frags   = load_fragment_library(DEFAULT_CFG["fragments_parquet"],
                                     n=DEFAULT_CFG["n_frags"],
                                     min_count=DEFAULT_CFG["min_frag_count"])
-    targets = load_target_distribution(DEFAULT_CFG["parents_parquet"],
-                                       n=DEFAULT_CFG["n_targets"])
-    env = MolEnv(frags, targets, max_steps=DEFAULT_CFG["max_steps"])
-
     _root = _Path(__file__).resolve().parent.parent
     _res  = _root / "results"
     _res.mkdir(exist_ok=True)
 
     if args.which in ("ppo", "both"):
         print("Evaluating PPO checkpoints ...")
-        eval_dir(str(_root / "checkpoints_ppo"), "fp", eval_actor_fp, env, device, str(_res / "val_results_ppo.json"))
+        eval_dir(str(_root / "checkpoints_ppo"), "fp", eval_actor_fp, frags, device, str(_res / "val_results_ppo.json"))
 
     if args.which in ("gnn", "both"):
         print("Evaluating GNN checkpoints ...")
-        eval_dir(str(_root / "checkpoints_gnn"), "gnn", eval_actor_gnn, env, device, str(_res / "val_results_gnn.json"))
+        eval_dir(str(_root / "checkpoints_gnn"), "gnn", eval_actor_gnn, frags, device, str(_res / "val_results_gnn.json"))
 
 
 if __name__ == "__main__":

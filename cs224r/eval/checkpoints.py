@@ -14,7 +14,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from env import load_fragment_library, load_target_distribution
+from env import load_fragment_library, load_target_distribution, parse_property_names
 from env import MolEnv, TERMINATE
 from models import Actor
 from training.a2c import DEFAULT_CFG
@@ -60,10 +60,11 @@ def main():
     device = torch.device("cpu")
 
     print("Loading data ...")
-    frags   = load_fragment_library(DEFAULT_CFG["fragments_parquet"],
-                                    n=args.n_frags, min_count=DEFAULT_CFG["min_frag_count"])
-    targets = load_target_distribution(DEFAULT_CFG["parents_parquet"], n=args.n_targets)
-    env     = MolEnv(frags, targets, max_steps=DEFAULT_CFG["max_steps"])
+    frags = load_fragment_library(
+        DEFAULT_CFG["fragments_parquet"],
+        n=args.n_frags,
+        min_count=DEFAULT_CFG["min_frag_count"],
+    )
 
     ckpts = sorted(CKPT_DIR.glob("ckpt_ep*.pt"),
                    key=lambda p: int(p.stem.split("ep")[1]))
@@ -72,8 +73,21 @@ def main():
     for ckpt_path in ckpts:
         ep = int(ckpt_path.stem.split("ep")[1])
         ckpt = torch.load(ckpt_path, map_location=device)
-        hidden = ckpt.get("config", {}).get("hidden_dim", 256)
-        actor  = Actor(hidden_dim=hidden).to(device)
+        cfg = ckpt.get("config", {})
+        property_names = parse_property_names(cfg.get("goal_properties", DEFAULT_CFG["goal_properties"]))
+        targets = load_target_distribution(
+            cfg.get("parents_parquet", DEFAULT_CFG["parents_parquet"]),
+            n=args.n_targets,
+            property_names=property_names,
+        )
+        env = MolEnv(
+            frags,
+            targets,
+            max_steps=cfg.get("max_steps", DEFAULT_CFG["max_steps"]),
+            property_names=property_names,
+        )
+        hidden = cfg.get("hidden_dim", 256)
+        actor  = Actor(state_dim=env.state_dim, hidden_dim=hidden).to(device)
         actor.load_state_dict(ckpt["actor"])
 
         mean_dist = eval_actor(actor, env, n=args.val_n, device=device)

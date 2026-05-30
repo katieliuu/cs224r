@@ -2,21 +2,25 @@
 features.py
 State featurisation, property computation, and action feature vectors.
 
-State  = concat(mol_fp: FP_BITS, goal_norm: GOAL_DIM)
+State  = concat(mol_fp: FP_BITS, goal_norm: goal_dim)
 Action = concat(frag_fp: FP_BITS, one_hot(brics_frag): BRICS_DIM, one_hot(brics_mol): BRICS_DIM)
 """
 import _path_bootstrap  # noqa: F401
 
-from typing import Optional
+from typing import Optional, Sequence
 
 import numpy as np
 from rdkit import Chem
-from rdkit.Chem import AllChem, Descriptors
-from rdkit.Chem.QED import qed as _rdkit_qed
+from rdkit.Chem import AllChem
 
 from core.structs import MolGraph
 from chem.build.molgraph_to_mol import molgraph_to_mol
-from .data import normalize_props, GOAL_DIM
+from .data import GOAL_DIM
+from .properties import (
+    DEFAULT_PROPERTY_NAMES,
+    compute_norm_properties as compute_named_norm_properties,
+    compute_raw_properties as compute_named_raw_properties,
+)
 
 # ---------------------------------------------------------------------------
 # Dimensions
@@ -25,6 +29,10 @@ FP_BITS = 512
 BRICS_DIM = 17          # BRICS types 0-16 (0 = unknown/fallback)
 ACTION_FEAT_DIM = FP_BITS + 2 * BRICS_DIM   # 512 + 34 = 546
 STATE_DIM = FP_BITS + GOAL_DIM              # 512 + 3 = 515
+
+
+def state_dim(goal_dim: int) -> int:
+    return FP_BITS + goal_dim
 
 
 # ---------------------------------------------------------------------------
@@ -89,7 +97,7 @@ def brics_onehot(label: str) -> np.ndarray:
 # ---------------------------------------------------------------------------
 
 def state_features(mg: MolGraph, goal_norm: np.ndarray) -> np.ndarray:
-    """Concatenate mol fingerprint and normalised goal vector → (STATE_DIM,)."""
+    """Concatenate mol fingerprint and normalised goal vector."""
     fp = molgraph_to_fp(mg)
     return np.concatenate([fp, goal_norm.astype(np.float32)])
 
@@ -107,18 +115,17 @@ def action_features(frag_fp: np.ndarray, frag_label: str, mol_label: str) -> np.
 # Property computation (on complete RDKit molecules)
 # ---------------------------------------------------------------------------
 
-def compute_raw_properties(mol: Chem.Mol) -> Optional[np.ndarray]:
-    """Return (sLogP, QED, TPSA) as float32 array, or None on failure."""
-    try:
-        logp = Descriptors.MolLogP(mol)
-        q    = _rdkit_qed(mol)
-        tpsa = Descriptors.TPSA(mol)
-        return np.array([logp, q, tpsa], dtype=np.float32)
-    except Exception:
-        return None
+def compute_raw_properties(
+    mol: Chem.Mol,
+    property_names: Sequence[str] = DEFAULT_PROPERTY_NAMES,
+) -> Optional[np.ndarray]:
+    """Return raw properties in the requested property order, or None on failure."""
+    return compute_named_raw_properties(mol, property_names)
 
 
-def compute_norm_properties(mol: Chem.Mol) -> Optional[np.ndarray]:
+def compute_norm_properties(
+    mol: Chem.Mol,
+    property_names: Sequence[str] = DEFAULT_PROPERTY_NAMES,
+) -> Optional[np.ndarray]:
     """Normalised [0,1] property vector, or None on failure."""
-    raw = compute_raw_properties(mol)
-    return None if raw is None else normalize_props(raw)
+    return compute_named_norm_properties(mol, property_names)

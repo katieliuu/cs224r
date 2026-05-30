@@ -32,8 +32,12 @@ try:
 except ImportError:
     _wandb = None
 
-from env import load_fragment_library, load_target_distribution, GOAL_DIM
-from env import MolEnv, Action, TERMINATE, StepResult
+from env import (
+    load_fragment_library, load_target_distribution,
+    MolEnv, Action, TERMINATE, StepResult,
+    DEFAULT_PROPERTY_NAMES, DEFAULT_PROPERTY_SURROGATE_CFG,
+    build_env_reward_config, parse_reward_vector, parse_property_names,
+)
 from models import GNNActor, GNNCritic
 from env import ReplayBuffer, Episode, Transition
 
@@ -49,6 +53,8 @@ DEFAULT_CFG: Dict = dict(
     min_frag_count=5_000,
     n_targets=300,
     max_steps=6,
+    goal_properties=",".join(DEFAULT_PROPERTY_NAMES),
+    reward_properties="",
     n_episodes=10_000,
     batch_size=64,
     hidden_dim=256,
@@ -60,6 +66,13 @@ DEFAULT_CFG: Dict = dict(
     entropy_coef=0.005,
     critic_coef=0.5,
     grad_clip=1.0,
+    use_property_surrogate_reward=False,
+    property_surrogate_scale=DEFAULT_PROPERTY_SURROGATE_CFG["scale"],
+    property_surrogate_dummy_bonus=DEFAULT_PROPERTY_SURROGATE_CFG["dummy_bonus"],
+    property_surrogate_step_penalty=DEFAULT_PROPERTY_SURROGATE_CFG["step_penalty"],
+    property_surrogate_weights="",
+    property_surrogate_temperatures="",
+    property_surrogate_invalid_score=DEFAULT_PROPERTY_SURROGATE_CFG["invalid_score"],
     log_every=50,
     checkpoint_every=500,
     checkpoint_dir="checkpoints_gnn",
@@ -134,7 +147,7 @@ def update_gnn(
     Gs: List[torch.Tensor] = []
     for (t, G) in batch:
         mg     = t.info.get("mol_graph")
-        goal_t = torch.tensor(t.state[-GOAL_DIM:], dtype=torch.float32, device=device)
+        goal_t = torch.tensor(t.goal, dtype=torch.float32, device=device)
         G_t    = torch.tensor(G, dtype=torch.float32, device=device)
         Vs.append(critic(mg, goal_t, device))
         Gs.append(G_t)
@@ -150,7 +163,7 @@ def update_gnn(
 
     for i, (t, G) in enumerate(batch):
         mg     = t.info.get("mol_graph")
-        goal_t = torch.tensor(t.state[-GOAL_DIM:], dtype=torch.float32, device=device)
+        goal_t = torch.tensor(t.goal, dtype=torch.float32, device=device)
         af_t   = torch.tensor(t.action_feats, dtype=torch.float32, device=device)
 
         dist     = actor.action_dist(mg, goal_t, af_t, device)
@@ -209,12 +222,32 @@ def train(cfg: Optional[Dict] = None) -> Tuple[GNNActor, GNNCritic]:
     print(f"  {len(frags)} fragments")
 
     print("Loading target distribution ...")
-    targets = load_target_distribution(cfg["parents_parquet"], n=cfg["n_targets"])
+    property_names = parse_property_names(cfg["goal_properties"])
+    targets = load_target_distribution(
+        cfg["parents_parquet"],
+        n=cfg["n_targets"],
+        property_names=property_names,
+    )
     print(f"  {len(targets)} targets")
 
-    env    = MolEnv(frags, targets, max_steps=cfg["max_steps"])
-    actor  = GNNActor(gnn_dim=cfg["gnn_dim"], hidden_dim=cfg["hidden_dim"]).to(device)
-    critic = GNNCritic(gnn_dim=cfg["gnn_dim"], hidden_dim=cfg["hidden_dim"]).to(device)
+    reward_cfg = build_env_reward_config(cfg)
+    env    = MolEnv(
+        frags,
+        targets,
+        max_steps=cfg["max_steps"],
+        property_names=property_names,
+        reward_config=reward_cfg,
+    )
+    actor  = GNNActor(
+        gnn_dim=cfg["gnn_dim"],
+        goal_dim=env.goal_dim,
+        hidden_dim=cfg["hidden_dim"],
+    ).to(device)
+    critic = GNNCritic(
+        gnn_dim=cfg["gnn_dim"],
+        goal_dim=env.goal_dim,
+        hidden_dim=cfg["hidden_dim"],
+    ).to(device)
 
     n_actor  = sum(p.numel() for p in actor.parameters())
     n_critic = sum(p.numel() for p in critic.parameters())
@@ -224,7 +257,13 @@ def train(cfg: Optional[Dict] = None) -> Tuple[GNNActor, GNNCritic]:
     opt_actor  = optim.Adam(actor.parameters(),  lr=cfg["lr_actor"])
     opt_critic = optim.Adam(critic.parameters(), lr=cfg["lr_critic"])
 
-    buffer = ReplayBuffer(max_episodes=2_000, gamma=cfg["gamma"], her_k=cfg["her_k"])
+    buffer = ReplayBuffer(
+        max_episodes=2_000,
+        gamma=cfg["gamma"],
+        her_k=cfg["her_k"],
+        goal_dim=env.goal_dim,
+        reward_config=reward_cfg,
+    )
 
     os.makedirs(cfg["checkpoint_dir"], exist_ok=True)
 
@@ -243,8 +282,9 @@ def train(cfg: Optional[Dict] = None) -> Tuple[GNNActor, GNNCritic]:
         ep_rewards.append(total_r)
         achieved = ep.achieved_goal
         ep_valid.append(1.0 if achieved is not None else 0.0)
-        if achieved is not None:
-            ep_dists.append(-ep.transitions[-1].reward)
+        terminal_dist = ep.transitions[-1].info.get("terminal_distance") if ep.transitions else None
+        if terminal_dist is not None:
+            ep_dists.append(float(terminal_dist))
 
         if len(buffer) >= 5:
             batch   = buffer.sample_transitions(cfg["batch_size"])
@@ -301,10 +341,27 @@ def _parse_args() -> Dict:
     p.add_argument("--n_episodes",       type=int,   default=DEFAULT_CFG["n_episodes"])
     p.add_argument("--n_frags",          type=int,   default=DEFAULT_CFG["n_frags"])
     p.add_argument("--n_targets",        type=int,   default=DEFAULT_CFG["n_targets"])
+    p.add_argument("--goal_properties",  type=str,   default=DEFAULT_CFG["goal_properties"])
+    p.add_argument("--reward_properties", type=str,  default=DEFAULT_CFG["reward_properties"])
     p.add_argument("--hidden_dim",       type=int,   default=DEFAULT_CFG["hidden_dim"])
     p.add_argument("--gnn_dim",          type=int,   default=DEFAULT_CFG["gnn_dim"])
     p.add_argument("--her_k",            type=int,   default=DEFAULT_CFG["her_k"])
     p.add_argument("--entropy_coef",     type=float, default=DEFAULT_CFG["entropy_coef"])
+    p.add_argument("--use_property_surrogate_reward", action="store_true", default=False)
+    p.add_argument("--property_surrogate_scale", type=float, default=DEFAULT_CFG["property_surrogate_scale"])
+    p.add_argument("--property_surrogate_dummy_bonus", type=float, default=DEFAULT_CFG["property_surrogate_dummy_bonus"])
+    p.add_argument("--property_surrogate_step_penalty", type=float, default=DEFAULT_CFG["property_surrogate_step_penalty"])
+    p.add_argument(
+        "--property_surrogate_weights",
+        type=str,
+        default=DEFAULT_CFG["property_surrogate_weights"],
+    )
+    p.add_argument(
+        "--property_surrogate_temperatures",
+        type=str,
+        default=DEFAULT_CFG["property_surrogate_temperatures"],
+    )
+    p.add_argument("--property_surrogate_invalid_score", type=float, default=DEFAULT_CFG["property_surrogate_invalid_score"])
     p.add_argument("--device",           type=str,   default=DEFAULT_CFG["device"])
     p.add_argument("--checkpoint_dir",   type=str,   default=DEFAULT_CFG["checkpoint_dir"])
     p.add_argument("--log_every",        type=int,   default=DEFAULT_CFG["log_every"])
@@ -315,6 +372,22 @@ def _parse_args() -> Dict:
     args = p.parse_args()
     cfg  = dict(DEFAULT_CFG)
     cfg.update(vars(args))
+    if cfg["property_surrogate_weights"]:
+        reward_names = parse_property_names(
+            cfg["reward_properties"],
+            default=parse_property_names(cfg["goal_properties"]),
+        )
+        cfg["property_surrogate_weights"] = parse_reward_vector(
+            cfg["property_surrogate_weights"], expected_dim=len(reward_names)
+        )
+    if cfg["property_surrogate_temperatures"]:
+        reward_names = parse_property_names(
+            cfg["reward_properties"],
+            default=parse_property_names(cfg["goal_properties"]),
+        )
+        cfg["property_surrogate_temperatures"] = parse_reward_vector(
+            cfg["property_surrogate_temperatures"], expected_dim=len(reward_names)
+        )
     return cfg
 
 

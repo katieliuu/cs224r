@@ -19,6 +19,8 @@ def main(
     n_episodes: int = 10_000,
     n_frags: int = 200,
     n_targets: int = 300,
+    goal_properties: str = "sLogP,QED,TPSA",
+    reward_properties: str = "",
     hidden_dim: int = 256,
     her_k: int = 4,
     entropy_coef: float = 0.005,
@@ -26,6 +28,13 @@ def main(
     lr_critic: float = 1e-3,
     log_every: int = 50,
     checkpoint_every: int = 500,
+    use_property_surrogate_reward: bool = False,
+    property_surrogate_scale: float = 0.25,
+    property_surrogate_dummy_bonus: float = 0.05,
+    property_surrogate_step_penalty: float = 0.005,
+    property_surrogate_weights: str = "",
+    property_surrogate_temperatures: str = "",
+    property_surrogate_invalid_score: float = 0.0,
     use_wandb: bool = False,
 ):
     def build_args(seed: int) -> list[str]:
@@ -34,6 +43,7 @@ def main(
             "--n_episodes",       str(n_episodes),
             "--n_frags",          str(n_frags),
             "--n_targets",        str(n_targets),
+            "--goal_properties",  goal_properties,
             "--hidden_dim",       str(hidden_dim),
             "--her_k",            str(her_k),
             "--entropy_coef",     str(entropy_coef),
@@ -44,6 +54,17 @@ def main(
             "--checkpoint_dir",   f"/mnt/results/checkpoints_{algo}_seed{seed}",
             "--device",           "cuda",
         ]
+        if use_property_surrogate_reward:
+            args.extend([
+                "--use_property_surrogate_reward",
+                "--property_surrogate_scale", str(property_surrogate_scale),
+                "--property_surrogate_dummy_bonus", str(property_surrogate_dummy_bonus),
+                "--property_surrogate_step_penalty", str(property_surrogate_step_penalty),
+                "--reward_properties", reward_properties,
+                "--property_surrogate_weights", property_surrogate_weights,
+                "--property_surrogate_temperatures", property_surrogate_temperatures,
+                "--property_surrogate_invalid_score", str(property_surrogate_invalid_score),
+            ])
         if use_wandb:
             args.append("--use_wandb")
         return args
